@@ -1,0 +1,37 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-mist text-ink font-body antialiased;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-display;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-white/70 backdrop-blur border border-white/60 shadow-glow;
+  }
+
+  .pill {
+    @apply rounded-full border border-ink/10 bg-white/70 px-4 py-2 text-xs uppercase tracking-[0.25em] text-ink/70;
+  }
+
+  .section {
+    @apply px-6 md:px-12 lg:px-20 py-16;
+  }
+
+  .button-primary {
+    @apply rounded-full bg-ocean px-6 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-ink;
+  }
+
+  .button-secondary {
+    @apply rounded-full border border-ocean/30 px-6 py-3 text-sm font-semibold text-ocean transition hover:-translate-y-0.5 hover:border-ocean hover:bg-white;
+  }
+}
