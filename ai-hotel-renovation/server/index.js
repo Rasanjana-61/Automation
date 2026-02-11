@@ -62,6 +62,17 @@ const sampleHotels = [
   }
 ];
 
+const bookingSites = [
+  "Booking.com",
+  "Agoda",
+  "Trivago",
+  "Expedia",
+  "Hotels.com",
+  "Kayak",
+  "Trip.com",
+  "MakeMyTrip"
+];
+
 const hotelSchema = new mongoose.Schema(
   {
     name: String,
@@ -128,6 +139,7 @@ if (mongoUri) {
 
 const memoryBookings = [];
 const memoryUsers = [];
+const bookingSessions = new Map();
 
 const sanitizeUser = (user) => ({
   id: user.id || user._id?.toString(),
@@ -158,6 +170,51 @@ const requireAuth = (req, res, next) => {
   } catch (_error) {
     return res.status(401).json({ message: "Invalid or expired token" });
   }
+};
+
+const hashCode = (value) =>
+  `${value}`
+    .split("")
+    .reduce((acc, char) => acc + char.charCodeAt(0), 0);
+
+const getSitePrice = (hotel, siteName) => {
+  const seed = hashCode(`${hotel.id}-${siteName}`) % 31;
+  const modifier = (seed - 15) / 100;
+  return Math.max(45, Math.round(hotel.pricePerNight * (1 + modifier)));
+};
+
+const enrichHotelWithComparisons = (hotel) => {
+  const comparisons = bookingSites.map((site) => ({
+    site,
+    price: getSitePrice(hotel, site),
+    bookingUrl: `https://example.com/book/${encodeURIComponent(hotel.name)}/${encodeURIComponent(
+      site
+    )}`
+  }));
+  const bestDeal = comparisons.reduce((best, current) =>
+    current.price < best.price ? current : best
+  );
+  return { ...hotel, comparisons, bestDeal };
+};
+
+const getBookingStep = (session) => {
+  if (!session.roomType) return "room_type";
+  if (!session.checkIn || !session.checkOut) return "dates";
+  if (!session.guests) return "guests";
+  if (!session.guestName) return "guest_info";
+  if (!session.confirmed) return "confirmation";
+  return "completed";
+};
+
+const parseDates = (message) => {
+  const rangeMatch = message.match(/(\d{4}-\d{2}-\d{2})\s*(to|-)\s*(\d{4}-\d{2}-\d{2})/i);
+  if (!rangeMatch) return null;
+  return { checkIn: rangeMatch[1], checkOut: rangeMatch[3] };
+};
+
+const parseGuests = (message) => {
+  const match = message.match(/(\d+)\s*(guest|guests|adult|adults)/i);
+  return match ? Number(match[1]) : null;
 };
 
 app.post("/api/auth/register", async (req, res) => {
@@ -355,6 +412,149 @@ app.post("/api/ai/recommend", (req, res) => {
       preferences ? `It also matches your preference for ${preferences}.` : ""
     }`
   });
+});
+
+app.post("/api/agent/search", (req, res) => {
+  const query = `${req.body?.query || ""}`.trim();
+  if (!query) return res.status(400).json({ message: "Search query is required" });
+
+  const normalized = query.toLowerCase();
+  const matched = sampleHotels
+    .filter(
+      (hotel) =>
+        hotel.location.toLowerCase().includes(normalized) ||
+        hotel.name.toLowerCase().includes(normalized) ||
+        normalized.includes(hotel.location.toLowerCase().split(",")[0].trim().toLowerCase())
+    )
+    .slice(0, 15);
+
+  const hotels = (matched.length ? matched : sampleHotels)
+    .slice(0, 15)
+    .map(enrichHotelWithComparisons);
+
+  const prices = hotels.map((item) => item.bestDeal.price);
+  const summary = {
+    query,
+    totalHotels: hotels.length,
+    minPrice: Math.min(...prices),
+    maxPrice: Math.max(...prices),
+    avgPrice: Math.round(prices.reduce((acc, value) => acc + value, 0) / prices.length)
+  };
+
+  return res.json({ summary, hotels });
+});
+
+app.post("/api/agent/booking/start", (req, res) => {
+  const { hotelId } = req.body;
+  if (!hotelId) return res.status(400).json({ message: "hotelId is required" });
+
+  const hotel = sampleHotels.find((item) => item.id === hotelId);
+  if (!hotel) return res.status(404).json({ message: "Hotel not found" });
+
+  const sessionId = `s-${Date.now()}`;
+  const session = {
+    sessionId,
+    hotelId: hotel.id,
+    hotelName: hotel.name,
+    roomType: "",
+    checkIn: "",
+    checkOut: "",
+    guests: 0,
+    guestName: "",
+    confirmed: false,
+    currentStep: "room_type"
+  };
+  bookingSessions.set(sessionId, session);
+
+  return res.json({
+    session,
+    reply: `Booking started for ${hotel.name}. Choose room type: ${hotel.roomTypes.join(", ")}.`
+  });
+});
+
+app.post("/api/agent/booking/message", (req, res) => {
+  const { sessionId, message } = req.body;
+  if (!sessionId || !message) {
+    return res.status(400).json({ message: "sessionId and message are required" });
+  }
+
+  const session = bookingSessions.get(sessionId);
+  if (!session) return res.status(404).json({ message: "Session not found" });
+
+  const hotel = sampleHotels.find((item) => item.id === session.hotelId);
+  const text = `${message}`.trim();
+  const lower = text.toLowerCase();
+
+  if (["cancel", "stop", "abort"].includes(lower)) {
+    bookingSessions.delete(sessionId);
+    return res.json({
+      session: null,
+      currentStep: "cancelled",
+      reply: "Booking cancelled."
+    });
+  }
+
+  if (["confirm", "yes", "confirm booking"].includes(lower) && getBookingStep(session) === "confirmation") {
+    session.confirmed = true;
+    session.currentStep = "completed";
+    return res.json({
+      session,
+      currentStep: session.currentStep,
+      reply: `Confirmed. Booking ID: BK-${Date.now()}.`
+    });
+  }
+
+  const roomMatch =
+    hotel?.roomTypes.find((room) => lower.includes(room.toLowerCase())) || null;
+  if (roomMatch) session.roomType = roomMatch;
+
+  const dateRange = parseDates(text);
+  if (dateRange) {
+    session.checkIn = dateRange.checkIn;
+    session.checkOut = dateRange.checkOut;
+  }
+
+  const guestCount = parseGuests(text);
+  if (guestCount) session.guests = guestCount;
+
+  if (/name\s*[:\-]/i.test(text) || lower.startsWith("i am ") || lower.startsWith("my name is ")) {
+    const cleaned = text
+      .replace(/name\s*[:\-]/i, "")
+      .replace(/my name is/i, "")
+      .replace(/i am/i, "")
+      .trim();
+    if (cleaned) session.guestName = cleaned;
+  }
+
+  session.currentStep = getBookingStep(session);
+
+  let reply = "";
+  if (session.currentStep === "room_type") {
+    reply = `Please select room type: ${hotel?.roomTypes.join(", ")}.`;
+  } else if (session.currentStep === "dates") {
+    reply = "Share dates in format YYYY-MM-DD to YYYY-MM-DD.";
+  } else if (session.currentStep === "guests") {
+    reply = "How many guests?";
+  } else if (session.currentStep === "guest_info") {
+    reply = "Please provide guest name (example: Name: Alex Morgan).";
+  } else if (session.currentStep === "confirmation") {
+    reply = `Summary: ${session.roomType}, ${session.checkIn} to ${session.checkOut}, ${session.guests} guests, guest ${session.guestName}. Type "confirm" to complete.`;
+  } else {
+    reply = "Booking completed.";
+  }
+
+  return res.json({
+    session,
+    currentStep: session.currentStep,
+    reply
+  });
+});
+
+app.post("/api/agent/booking/cancel", (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ message: "sessionId is required" });
+  bookingSessions.delete(sessionId);
+  return res.json({ message: "Booking session cancelled", currentStep: "cancelled" });
 });
 
 const port = process.env.PORT || 5000;
