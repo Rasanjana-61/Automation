@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 dotenv.config();
 
@@ -89,8 +91,25 @@ const bookingSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const userSchema = new mongoose.Schema(
+  {
+    fullName: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    passwordHash: { type: String, required: true },
+    role: { type: String, default: "guest" },
+    lastLoginAt: Date
+  },
+  { timestamps: true }
+);
+
 const Hotel = mongoose.models.Hotel || mongoose.model("Hotel", hotelSchema);
 const Booking = mongoose.models.Booking || mongoose.model("Booking", bookingSchema);
+const User = mongoose.models.User || mongoose.model("User", userSchema);
+
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_replace_me";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
 
 let dbReady = false;
 const mongoUri = process.env.MONGODB_URI;
@@ -108,6 +127,136 @@ if (mongoUri) {
 }
 
 const memoryBookings = [];
+const memoryUsers = [];
+
+const sanitizeUser = (user) => ({
+  id: user.id || user._id?.toString(),
+  fullName: user.fullName,
+  email: user.email,
+  role: user.role || "guest",
+  createdAt: user.createdAt
+});
+
+const createToken = (user) =>
+  jwt.sign({ userId: user.id || user._id?.toString(), email: user.email, role: user.role || "guest" }, JWT_SECRET, {
+    expiresIn: JWT_EXPIRES_IN
+  });
+
+const getBearerToken = (header) => {
+  if (!header?.startsWith("Bearer ")) return null;
+  return header.substring(7);
+};
+
+const requireAuth = (req, res, next) => {
+  const token = getBearerToken(req.headers.authorization);
+  if (!token) return res.status(401).json({ message: "Unauthorized" });
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.auth = payload;
+    return next();
+  } catch (_error) {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
+};
+
+app.post("/api/auth/register", async (req, res) => {
+  const { fullName, email, password } = req.body;
+  const normalizedEmail = (email || "").toLowerCase().trim();
+
+  if (!fullName?.trim()) {
+    return res.status(400).json({ message: "Full name is required" });
+  }
+  if (!EMAIL_REGEX.test(normalizedEmail)) {
+    return res.status(400).json({ message: "Valid email is required" });
+  }
+  if (!PASSWORD_REGEX.test(password || "")) {
+    return res.status(400).json({
+      message:
+        "Password must be at least 8 characters and include uppercase, lowercase, and number"
+    });
+  }
+
+  if (dbReady) {
+    const existing = await User.findOne({ email: normalizedEmail });
+    if (existing) return res.status(409).json({ message: "Email already in use" });
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const user = await User.create({
+      fullName: fullName.trim(),
+      email: normalizedEmail,
+      passwordHash
+    });
+    const safeUser = sanitizeUser(user.toObject());
+    const token = createToken(safeUser);
+    return res.status(201).json({ token, user: safeUser });
+  }
+
+  const existing = memoryUsers.find((user) => user.email === normalizedEmail);
+  if (existing) return res.status(409).json({ message: "Email already in use" });
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  const user = {
+    id: `u-${Date.now()}`,
+    fullName: fullName.trim(),
+    email: normalizedEmail,
+    passwordHash,
+    role: "guest",
+    createdAt: new Date().toISOString()
+  };
+  memoryUsers.push(user);
+  const safeUser = sanitizeUser(user);
+  const token = createToken(safeUser);
+  return res.status(201).json({ token, user: safeUser });
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+  const normalizedEmail = (email || "").toLowerCase().trim();
+
+  if (!EMAIL_REGEX.test(normalizedEmail) || !password) {
+    return res.status(400).json({ message: "Email and password are required" });
+  }
+
+  if (dbReady) {
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(401).json({ message: "Invalid credentials" });
+
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    if (!isMatch) return res.status(401).json({ message: "Invalid credentials" });
+
+    user.lastLoginAt = new Date();
+    await user.save();
+
+    const safeUser = sanitizeUser(user.toObject());
+    const token = createToken(safeUser);
+    return res.json({ token, user: safeUser });
+  }
+
+  const user = memoryUsers.find((item) => item.email === normalizedEmail);
+  if (!user) return res.status(401).json({ message: "Invalid credentials" });
+
+  const isMatch = await bcrypt.compare(password, user.passwordHash);
+  if (!isMatch) return res.status(401).json({ message: "Invalid credentials" });
+
+  user.lastLoginAt = new Date().toISOString();
+  const safeUser = sanitizeUser(user);
+  const token = createToken(safeUser);
+  return res.json({ token, user: safeUser });
+});
+
+app.get("/api/auth/me", requireAuth, async (req, res) => {
+  const userId = req.auth.userId;
+  if (dbReady) {
+    const user = await User.findById(userId).select("-passwordHash");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    return res.json({ user });
+  }
+
+  const user = memoryUsers.find((item) => item.id === userId);
+  if (!user) return res.status(404).json({ message: "User not found" });
+  return res.json({ user: sanitizeUser(user) });
+});
 
 app.get("/api/hotels", async (_req, res) => {
   if (dbReady) {
@@ -129,8 +278,8 @@ app.get("/api/hotels/:id", async (req, res) => {
   return res.json(hotel);
 });
 
-app.post("/api/bookings", async (req, res) => {
-  const payload = req.body;
+app.post("/api/bookings", requireAuth, async (req, res) => {
+  const payload = { ...req.body, userId: req.auth.userId };
   if (dbReady) {
     const booking = await Booking.create(payload);
     return res.json({ id: booking._id, ...booking.toObject() });
@@ -140,8 +289,12 @@ app.post("/api/bookings", async (req, res) => {
   return res.json(booking);
 });
 
-app.get("/api/bookings/user/:id", async (req, res) => {
+app.get("/api/bookings/user/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
+  if (req.auth.userId !== id) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
   if (dbReady) {
     const bookings = await Booking.find({ userId: id }).sort({ createdAt: -1 });
     return res.json(bookings.map((booking) => ({ ...booking.toObject(), id: booking._id })));
@@ -185,7 +338,7 @@ app.post("/api/ai/chat", async (req, res) => {
     const data = await response.json();
     const reply = data?.choices?.[0]?.message?.content?.trim();
     return res.json({ reply: reply || "Sorry, I could not generate a reply." });
-  } catch (error) {
+  } catch (_error) {
     return res.status(500).json({ reply: "AI service error. Try again." });
   }
 });
@@ -193,8 +346,8 @@ app.post("/api/ai/chat", async (req, res) => {
 app.post("/api/ai/recommend", (req, res) => {
   const { budget, guests, dates, preferences } = req.body;
   const numericBudget = Number(budget) || 150;
-  const match = sampleHotels.find((hotel) => hotel.pricePerNight <= numericBudget) ||
-    sampleHotels[0];
+  const match =
+    sampleHotels.find((hotel) => hotel.pricePerNight <= numericBudget) || sampleHotels[0];
 
   return res.json({
     hotel: match.name,

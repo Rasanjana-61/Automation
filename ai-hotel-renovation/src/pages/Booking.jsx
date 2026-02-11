@@ -1,9 +1,9 @@
 import { useState } from "react";
 import api from "../services/api";
+import { useAuth } from "../context/AuthContext";
 
 const initialForm = {
   name: "",
-  email: "",
   hotelId: "",
   roomType: "",
   checkIn: "",
@@ -12,6 +12,7 @@ const initialForm = {
 };
 
 export default function Booking() {
+  const { user } = useAuth();
   const [form, setForm] = useState(initialForm);
   const [status, setStatus] = useState("");
 
@@ -26,6 +27,7 @@ export default function Booking() {
     try {
       const response = await api.post("/bookings", {
         ...form,
+        email: user?.email || "",
         total: 0
       });
       setStatus(`Booking confirmed! Reference: ${response.data.id}`);
@@ -59,13 +61,11 @@ export default function Booking() {
               required
             />
             <input
-              name="email"
-              value={form.email}
-              onChange={handleChange}
+              value={user?.email || ""}
               placeholder="Email address"
               type="email"
-              className="rounded-2xl border border-ink/10 px-4 py-3 text-sm"
-              required
+              className="rounded-2xl border border-ink/10 bg-mist px-4 py-3 text-sm"
+              disabled
             />
             <div className="grid gap-4 md:grid-cols-2">
               <input

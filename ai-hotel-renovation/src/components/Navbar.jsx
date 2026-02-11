@@ -1,4 +1,5 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 
 const links = [
   { to: "/", label: "Home" },
@@ -8,6 +9,14 @@ const links = [
 ];
 
 export default function Navbar() {
+  const { isAuthenticated, user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login");
+  };
+
   return (
     <header className="sticky top-0 z-30 border-b border-white/60 bg-white/70 backdrop-blur">
       <nav className="flex items-center justify-between px-6 py-4 md:px-12 lg:px-20">
@@ -36,12 +45,37 @@ export default function Navbar() {
               {link.label}
             </NavLink>
           ))}
+          {isAuthenticated && (
+            <NavLink
+              to="/profile"
+              className={({ isActive }) =>
+                `text-sm font-semibold ${isActive ? "text-ocean" : "text-ink/70"}`
+              }
+            >
+              Profile
+            </NavLink>
+          )}
         </div>
         <div className="flex items-center gap-3">
-          <button className="button-secondary hidden md:inline-flex">
-            Investor Deck
-          </button>
-          <button className="button-primary">Start Booking</button>
+          {isAuthenticated ? (
+            <>
+              <span className="hidden text-sm text-ink/70 md:inline">
+                {user?.fullName}
+              </span>
+              <button className="button-secondary" onClick={handleLogout}>
+                Logout
+              </button>
+            </>
+          ) : (
+            <>
+              <NavLink to="/login" className="button-secondary hidden md:inline-flex">
+                Login
+              </NavLink>
+              <NavLink to="/register" className="button-primary">
+                Register
+              </NavLink>
+            </>
+          )}
         </div>
       </nav>
     </header>
